@@ -32,26 +32,25 @@ contract StrategyHegicWBTC is BaseStrategy {
         address _unirouter,
     ) public BaseStrategy(_vault) {
         weth = _weth;
-        YFI = _YFI;
-        yvYFI = yvYFI;
+        Asset = _YFI;
+        yvAsset = _yvYFI;
         unirouter = _unirouter;
 
 
         IERC20(weth).safeApprove(unirouter, uint256(-1));
-        IERC20(YFI).safeApprove(yvYFI, uint256(-1));
+        IERC20(Asset).safeApprove(yvAsset, uint256(-1));
     }
 
     function protectedTokens() internal override view returns (address[] memory) {
         address[] memory protected = new address[](2);
         // want is weth, which is protected by default
-        protected[0] = YFI;
-        protected[1] = yvYFI;
+        protected[0] = Asset;
+        protected[1] = yvAsset;
         return protected;
     }
 
-    // todo: this
     function estimatedTotalAssets() public override view returns (uint256) {
-        return balanceOfWant().add(balanceOfStake()).add(hegicFutureProfit());
+        return balanceOfWant().add(balanceOfStake()).add(balanceOfAsset());
     }
 
     // todo: this
@@ -117,64 +116,83 @@ contract StrategyHegicWBTC is BaseStrategy {
         _amountFreed = balanceOfWant();
     }
 
-    // todo: this
     function _withdrawSome(uint256 _amount) internal returns (uint256) {
-        uint256 stakesToSell = 0;
-        if (_amount.mod(LOT_PRICE) == 0) {
-            stakesToSell = _amount.div(LOT_PRICE);
-        } else {
-            // If there is a remainder, we need to sell one more lot to cover
-            stakesToSell = _amount.div(LOT_PRICE).add(1);
-        }
-
-        // sell might fail if we hit the 24hs lock
-        IHegicStaking(hegicStaking).sell(stakesToSell);
-        return stakesToSell.mul(LOT_PRICE);
+        uint256 wantValue = wethConvert(_amount);
+        uint256 vaultShare = Vault(yvAsset).getpricePerFullShare();
+        uint256 vaultWithdraw = wantValue.div(vaultShare);
+        Vault(yvAsset).withdraw(vaultWithdraw);
+        uint256 assetBalance = IERC20(asset).balanceOf(address(this));
+        return assetToWant(assetBalance);
     }
 
-    // todo: this
     function prepareMigration(address _newStrategy) internal override {
         want.transfer(_newStrategy, balanceOfWant());
-        IERC20(hegicStaking).transfer(_newStrategy, IERC20(hegicStaking).balanceOf(address(this)));
+        asset.transfer(_newStrategy, IERC20(asset).balanceOf(address(this)));
+        yvAsset.transfer(_newStrategy, IERC20(yvAsset).balanceOf(address(this)));
     }
 
-    // Changed to WBTC. WBTC->HEGIC does not exist, so WBTC->ETH->HEGIC must do.
-    function _swap(uint256 _amountIn) internal returns (uint256[] memory amounts) {
-        address[] memory path = new address[](3);
-        path[0] = address(0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599); // wbtc
-        path[1] = address(0x6B175474E89094C44Da98b954EedeAC495271d0F); // dai
-        path[2] = address(want);
+    // wantToAsset
+    function wantToAsset(uint256 _amountIn) internal returns (uint256[] memory amounts) {
+        address[] memory path = new address[](2);
+        path[0] = address(want);
+        path[1] = address(0x0bc529c00C6401aEF6D220BE8C6Ea1667F6Ad93e); // YFI
 
         Uni(unirouter).swapExactTokensForTokens(_amountIn, uint256(0), path, address(this), now.add(1 days));
     }
 
-    function hegicFutureProfit() public view returns (uint256) {
-        uint256 wbtcProfit = wbtcFutureProfit();
-        if (wbtcProfit == 0) {
+    // assetToWant
+    function assetToWant(uint256 _amountIn) internal returns (uint256[] memory amounts) {
+        address[] memory path = new address[](2);
+        path[0] = address(0x0bc529c00C6401aEF6D220BE8C6Ea1667F6Ad93e); // YFI
+        path[1] = address(want);
+
+        Uni(unirouter).swapExactTokensForTokens(_amountIn, uint256(0), path, address(this), now.add(1 days));
+    }
+
+    // returns value of asset in terms of weth
+    function assetConvert(uint256 value) public view returns (uint256) {
+        if (value == 0) {
             return 0;
         }
 
-        address[] memory path = new address[](3);
-        path[0] = address(0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599); // wbtc
-        path[1] = address(0x6B175474E89094C44Da98b954EedeAC495271d0F); // dai
-        path[2] = address(want);
-        uint256[] memory amounts = Uni(unirouter).getAmountsOut(wbtcProfit, path);
+        else {
+        address[] memory path = new address[](2);
+        path[0] = address(0x0bc529c00C6401aEF6D220BE8C6Ea1667F6Ad93e); // YFI
+        path[1] = address(want);
+        uint256[] memory amounts = Uni(unirouter).getAmountsOut(value, path);
 
         return amounts[amounts.length - 1];
+        }
     }
 
-    // todo: this
-    function wbtcFutureProfit() public view returns (uint256) {
-        return IHegicStaking(hegicStaking).profitOf(address(this));
+    // returns value of weth in terms of asset
+    function wethConvert(uint256 value) public view returns (uint256) {
+        if (value == 0) {
+            return 0;
+        }
+
+        else {
+        address[] memory path = new address[](2);
+        path[0] = address(want);
+        path[1] = address(0x0bc529c00C6401aEF6D220BE8C6Ea1667F6Ad93e); // YFI
+        uint256[] memory amounts = Uni(unirouter).getAmountsOut(value, path);
+
+        return amounts[amounts.length - 1];
+        }
     }
 
-    //todo: this
+    function balanceOfAsset() public view returns (uint256) {
+        uint256 assetBalance = IERC20(Asset).balanceOf(address(this));
+        return assetConvert(assetBalance);
+    }
+
     function balanceOfWant() public view returns (uint256) {
         return IERC20(want).balanceOf(address(this));
     }
 
-    // todo: this
     function balanceOfStake() public view returns (uint256) {
-        return IERC20(hegicStaking).balanceOf(address(this)).mul(LOT_PRICE);
+        uint256 vaultShares = IERC20(yvAsset).balanceOf(address(this));
+        uint256 vaultBalance = vaultShares.mul(Vault(yvAsset).getPricePerFullShare);
+        return assetConvert(vaultBalance);
     }
 }
