@@ -13,7 +13,7 @@ import {BaseStrategy, StrategyParams} from "@yearnvaults/contracts/BaseStrategy.
 import "../../interfaces/yearn/Vault.sol";
 import "../../interfaces/uniswap/Uni.sol";
 
-contract StrategyHegicWBTC is BaseStrategy {
+contract IndexYFI is BaseStrategy {
     using SafeERC20 for IERC20;
     using Address for address;
     using SafeMath for uint256;
@@ -29,23 +29,22 @@ contract StrategyHegicWBTC is BaseStrategy {
         address _weth,
         address _YFI,
         address _yvYFI,
-        address _unirouter,
+        address _unirouter
     ) public BaseStrategy(_vault) {
         weth = _weth;
-        Asset = _YFI;
-        yvAsset = _yvYFI;
+        YFI = _YFI;
+        yvYFI = _yvYFI;
         unirouter = _unirouter;
 
-
         IERC20(weth).safeApprove(unirouter, uint256(-1));
-        IERC20(Asset).safeApprove(yvAsset, uint256(-1));
+        IERC20(YFI).safeApprove(yvYFI, uint256(-1));
     }
 
     function protectedTokens() internal override view returns (address[] memory) {
         address[] memory protected = new address[](2);
         // want is weth, which is protected by default
-        protected[0] = Asset;
-        protected[1] = yvAsset;
+        protected[0] = YFI;
+        protected[1] = yvYFI;
         return protected;
     }
 
@@ -53,7 +52,6 @@ contract StrategyHegicWBTC is BaseStrategy {
         return balanceOfWant().add(balanceOfStake()).add(balanceOfAsset());
     }
 
-    // todo: this
     function prepareReturn(uint256 _debtOutstanding) internal override returns (uint256 _profit, uint256 _loss, uint256 _debtPayment) {
         // We might need to return want to the vault
         if (_debtOutstanding > 0) {
@@ -63,35 +61,30 @@ contract StrategyHegicWBTC is BaseStrategy {
 
         uint256 balanceOfWantBefore = balanceOfWant();
 
-        // Claim profit only when available
-        uint256 wbtcProfit = wbtcFutureProfit();
-        if (wbtcProfit > 0) {
-            IHegicStaking(hegicStaking).claimProfit();
-            uint256 _wbtcBalance = IERC20(WBTC).balanceOf(address(this));
-            _swap(_wbtcBalance);
+        // in case there's any stray YFI, this will sweep for want
+        uint256 assetBalance = IERC20(YFI).balanceOf(address(this));
+        if (assetBalance > 0) {
+            assetToWant(assetBalance);
         }
 
-        // Final profit is want generated in the swap if wbtcProfit > 0
         _profit = balanceOfWant().sub(balanceOfWantBefore);
     }
 
-    // todo: this
     function adjustPosition(uint256 _debtOutstanding) internal override {
         //emergency exit is dealt with in prepareReturn
         if (emergencyExit) {
             return;
         }
 
-        // Invest the rest of the want
         uint256 _wantAvailable = balanceOfWant().sub(_debtOutstanding);
-        uint256 _lotsToBuy = _wantAvailable.div(LOT_PRICE);
+        wantToAsset(_wantAvailable);
+        uint256 assetBalance = IERC20(YFI).balanceOf(address(this));
 
-        if (_lotsToBuy > 0) {
-            IHegicStaking(hegicStaking).buy(_lotsToBuy);
+        if (assetBalance > 0) {
+            Vault(yvYFI).deposit(assetBalance);
         }
     }
 
-    // todo: this
     function exitPosition(uint256 _debtOutstanding)
         internal
         override
@@ -101,12 +94,13 @@ contract StrategyHegicWBTC is BaseStrategy {
           uint256 _debtPayment
         )
     {
-        uint256 stakes = IERC20(hegicStaking).balanceOf(address(this));
-        IHegicStaking(hegicStaking).sell(stakes);
+
+        Vault(yvYFI).withdrawAll();
+        uint256 assetBalance = IERC20(YFI).balanceOf(address(this));
+        assetToWant(assetBalance);
         return prepareReturn(_debtOutstanding);
     }
 
-    // todo: this
     function liquidatePosition(uint256 _amountNeeded) internal override returns (uint256 _amountFreed) {
         if (balanceOfWant() < _amountNeeded) {
             // We need to sell stakes to get back more want
@@ -118,20 +112,21 @@ contract StrategyHegicWBTC is BaseStrategy {
 
     function _withdrawSome(uint256 _amount) internal returns (uint256) {
         uint256 wantValue = wethConvert(_amount);
-        uint256 vaultShare = Vault(yvAsset).getpricePerFullShare();
+        uint256 vaultShare = Vault(yvYFI).getPricePerFullShare();
         uint256 vaultWithdraw = wantValue.div(vaultShare);
-        Vault(yvAsset).withdraw(vaultWithdraw);
-        uint256 assetBalance = IERC20(asset).balanceOf(address(this));
-        return assetToWant(assetBalance);
+        Vault(yvYFI).withdraw(vaultWithdraw);
+        uint256 assetBalance = IERC20(YFI).balanceOf(address(this));
+        assetToWant(assetBalance);
+        return balanceOfWant();
     }
 
     function prepareMigration(address _newStrategy) internal override {
         want.transfer(_newStrategy, balanceOfWant());
-        asset.transfer(_newStrategy, IERC20(asset).balanceOf(address(this)));
-        yvAsset.transfer(_newStrategy, IERC20(yvAsset).balanceOf(address(this)));
+        IERC20(YFI).transfer(_newStrategy, IERC20(YFI).balanceOf(address(this)));
+        IERC20(yvYFI).transfer(_newStrategy, IERC20(yvYFI).balanceOf(address(this)));
     }
 
-    // wantToAsset
+    // trades want for asset
     function wantToAsset(uint256 _amountIn) internal returns (uint256[] memory amounts) {
         address[] memory path = new address[](2);
         path[0] = address(want);
@@ -140,7 +135,7 @@ contract StrategyHegicWBTC is BaseStrategy {
         Uni(unirouter).swapExactTokensForTokens(_amountIn, uint256(0), path, address(this), now.add(1 days));
     }
 
-    // assetToWant
+    // trades asset for want
     function assetToWant(uint256 _amountIn) internal returns (uint256[] memory amounts) {
         address[] memory path = new address[](2);
         path[0] = address(0x0bc529c00C6401aEF6D220BE8C6Ea1667F6Ad93e); // YFI
@@ -182,7 +177,7 @@ contract StrategyHegicWBTC is BaseStrategy {
     }
 
     function balanceOfAsset() public view returns (uint256) {
-        uint256 assetBalance = IERC20(Asset).balanceOf(address(this));
+        uint256 assetBalance = IERC20(YFI).balanceOf(address(this));
         return assetConvert(assetBalance);
     }
 
@@ -191,8 +186,9 @@ contract StrategyHegicWBTC is BaseStrategy {
     }
 
     function balanceOfStake() public view returns (uint256) {
-        uint256 vaultShares = IERC20(yvAsset).balanceOf(address(this));
-        uint256 vaultBalance = vaultShares.mul(Vault(yvAsset).getPricePerFullShare);
+        uint256 vaultShares = IERC20(yvYFI).balanceOf(address(this));
+        uint256 vaultPrice = Vault(yvYFI).getPricePerFullShare();
+        uint256 vaultBalance = vaultShares.mul(vaultPrice);
         return assetConvert(vaultBalance);
     }
 }
