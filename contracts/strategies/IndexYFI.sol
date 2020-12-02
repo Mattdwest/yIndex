@@ -63,15 +63,15 @@ contract StrategyHegicWBTC is BaseStrategy {
 
         uint256 balanceOfWantBefore = balanceOfWant();
 
-        // Claim profit only when available
-        uint256 wbtcProfit = wbtcFutureProfit();
-        if (wbtcProfit > 0) {
+		// I changed this to WETH instead of wbtc. Since this is a weth strategy to stake then to yfi, I assume we have to use the variables declared above exclusively. It also stands to reason that we'd have to declare this as a protected token/class.
+        uint256 wethProfit = wethFutureProfit();
+        if (wethProfit > 0) {
             IHegicStaking(hegicStaking).claimProfit();
-            uint256 _wbtcBalance = IERC20(WBTC).balanceOf(address(this));
-            _swap(_wbtcBalance);
+            uint256 _wethBalance = IERC20(weth).balanceOf(address(this));
+            _swap(_wethBalance);
         }
 
-        // Final profit is want generated in the swap if wbtcProfit > 0
+        // Final profit is want generated in the swap if wethProfit > 0
         _profit = balanceOfWant().sub(balanceOfWantBefore);
     }
 
